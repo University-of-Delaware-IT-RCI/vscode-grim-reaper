@@ -1,0 +1,139 @@
+#!/usr/bin/python
+#
+# vscode-grim-reaper
+#
+# Identify .vscode-* process trees -- and destroy them!
+#
+
+import os, signal
+import re
+import subprocess
+import logging
+import argparse
+
+#
+# The following two variables -- vscodePsCommand and
+# vscodeLineRegex -- are probably the only two customization
+# points you will require.
+#
+# [vscodePsCommand]
+# The command we will execute to generate the list of processes.
+# The only items this script requires are the uid, pid, ppid,
+# and full command (for the sake of matching).
+#
+vscodePsCommand = ['ps', '-A', 'n', '-o', 'ruid,pid,ppid,args'];
+#
+# [vscodeLineRegex]
+# The regex that will identify naughty "vscode" processes:
+#
+vscodeLineRegex = re.compile(r'^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*/\.vscode-.*)$', re.IGNORECASE);
+
+
+#
+# Just a couple CLI options available to control the level
+# of logging and where that logging is directed:
+#
+cliParser = argparse.ArgumentParser(description='Seek and destroy vscode process trees')
+cliParser.add_argument('-v', '--verbose',
+            dest='verbosity',
+            action='count',
+            default=0,
+            help='generate more and more output as the program executes')
+cliParser.add_argument('-l', '--log', metavar='<filepath>',
+            dest='logfile',
+            default='-',
+            help='where to send program output; use a dash (-) for stderr')
+cliArgs = cliParser.parse_args()
+
+# Determine the logging level based on how many times the verbose
+# flag was used:
+logLevels = [logging.INFO, logging.DEBUG]
+logLevelIdx = cliArgs.verbosity
+if ( logLevelIdx >= len(logLevels) ): logLevelIdx = len(logLevels)
+
+# Build the list of logging config arguments:
+logConfig = { 'level': logLevels[logLevelIdx], 'format': '%(asctime)s %(message)s', 'datefmt': '[%Y-%m-%dT%H:%M:%S]' }
+if ( cliArgs.logfile != '-' ): logConfig['filename'] = cliArgs.logfile
+
+# Configure base logging accordingly:
+logging.basicConfig(**logConfig)
+
+
+#
+# Get to work now.  The flattened "list" of processes that we will
+# turn into a tree will be pushed into this dict:
+#
+vscodePsFlat = {}
+
+# Get the process listing and filter for "vscode" processes, creating
+# the flattened "list" of processes:
+vscodePs = subprocess.Popen(
+                    vscodePsCommand,
+                    stdout=subprocess.PIPE,
+                    cwd='/tmp'
+                )
+logging.debug('Running command: %s', ' '.join(vscodePsCommand))
+(vscodePsStdout, dummy) = vscodePs.communicate()
+nLinesChecked = 0
+nLinesMatched = 0
+for nextLine in vscodePsStdout.splitlines():
+    nLinesChecked = nLinesChecked + 1
+    vscodeMatch = vscodeLineRegex.match(nextLine)
+    if vscodeMatch is not None:
+        nLinesMatched = nLinesMatched + 1
+        vscodeUid = int(vscodeMatch.group(1))
+        vscodePid = int(vscodeMatch.group(2))
+        vscodePPid = int(vscodeMatch.group(3))
+        vscodeCmd = vscodeMatch.group(4)
+        vscodePsFlat[vscodePid] = {'uid': vscodeUid, 'pid': vscodePid, 'ppid': vscodePPid, 'cmd': vscodeCmd, 'children': {}}
+logging.debug('Processed %d pid(s), %d match(es)', nLinesChecked, nLinesMatched)
+
+if len(vscodePsFlat) > 0:
+    # Turn the flat list into a hierarchical tree of processes:
+    vscodePsTree = {}
+    handledItems = {}
+    while len(vscodePsFlat):
+        vscodeNextPSFlat = {}
+        for (vscodePid, vscodeInfo) in vscodePsFlat.iteritems():
+            if vscodeInfo['ppid'] in handledItems:
+                handledItems[vscodeInfo['ppid']]['children'][vscodePid] = vscodeInfo
+                handledItems[vscodePid] = vscodeInfo;
+            elif vscodeInfo['ppid'] not in vscodePsFlat:
+                # It's a process leader:
+                vscodePsTree[vscodePid] = vscodeInfo
+                handledItems[vscodePid] = vscodeInfo
+            else:
+                vscodeNextPSFlat[vscodePid] = vscodeInfo
+        vscodePsFlat = vscodeNextPSFlat
+    logging.debug('Flat process list collapsed to %d process group(s)', len(vscodePsTree))
+
+    def printPsTree(n, indent=0):
+        """Recursively list the nodes in a hierarchical tree of processes rooted at n."""
+        s = '{:8d} {:8d}    '.format(n['pid'], n['ppid']) + '  |-  '*indent + '{:32.32s}'.format(n['cmd'])
+        logging.debug(s)
+        for c in n['children'].itervalues():
+            printPsTree(c, indent + 1)
+
+    def killPsTree(n):
+        """Depth-first recursive kill of pids in a hierarchical tree of processes rooted at n."""
+        for c in n['children'].itervalues():
+            killPsTree(c)
+        os.kill(n['pid'], signal.SIGKILL)
+
+    def countPsTree(n):
+        """Recursively count the number of nodes in a hierarchical tree of processes rooted at n."""
+        pids = 1
+        for c in n['children'].itervalues():
+            pids = pids + countPsTree(c)
+        return pids
+
+    # Loop over each process group lead and kill 'em:
+    for vscodeLead in vscodePsTree.itervalues():
+        try:
+            killPsTree(vscodeLead)
+            logging.info('Killed %d process(es) under pid %d (uid %d)', countPsTree(vscodeLead), vscodeLead['pid'], vscodeLead['uid'])
+        except Exception as E:
+            logging.error('Failed to kill %d process(es) under pid %d (uid %d)', countPsTree(vscodeLead), vscodeLead['pid'], vscodeLead['uid'])
+        printPsTree(vscodeLead)
+
+logging.info('Checks and processing completed')

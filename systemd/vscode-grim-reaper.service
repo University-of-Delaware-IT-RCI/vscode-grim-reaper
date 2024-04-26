@@ -1,0 +1,7 @@
+[Unit]
+Description=Seek and destroy vscode processes
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vscode-grim-reaper -v -l /var/log/vscode-grim-reaper.log
+

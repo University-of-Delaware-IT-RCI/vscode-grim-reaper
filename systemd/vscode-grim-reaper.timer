@@ -1,0 +1,10 @@
+[Unit]
+Description=Seek and destroy vscode processes
+
+[Timer]
+Unit=vscode-grim-reaper.service
+OnCalendar=*-*-* *:00:00
+
+[Install]
+WantedBy=multi-user.target
+
